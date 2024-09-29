@@ -2,6 +2,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from statsmodels.tsa.statespace.sarimax import SARIMAX
+import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 import os
 
@@ -9,8 +10,7 @@ import os
 DATA_PATH = '/Users/caioteixeira/PycharmProjects/etfperformance/portfolio_data/'
 PORTFOLIO_PATH = DATA_PATH + 'path_to_your_yahoo_finance_portfolio.csv'
 OUTPUT_PATH = DATA_PATH + 'predictions.csv'
-YEARS_TO_PREDICT = [5, 10, 15]
-
+YEARS_TO_PREDICT = [5, 10, 15, 20]
 
 def read_and_normalize_portfolio(file_path):
     """
@@ -31,7 +31,6 @@ def fetch_and_enrich_etf_data(portfolio):
     with Last_Close, MA50, Volatility, Expense Ratio, and convert prices to USD if necessary.
     """
     etf_data = {}
-    base_url = "https://api.exchangeratesapi.io/latest?base="
 
     for _, row in portfolio.iterrows():
         ticker = row['Symbol']
@@ -56,13 +55,15 @@ def fetch_and_enrich_etf_data(portfolio):
         # Convert price to USD if necessary
         if currency != 'USD':
             try:
-                response = requests.get(f"{base_url}{currency}")
-                response.raise_for_status()  # Will raise an HTTPError if the status is 4xx, 5xx
-                rates = response.json()['rates']
-                exchange_rate = rates['USD']
+                # Fetch the exchange rate using yfinance for EUR/USD (or equivalent for other currencies)
+                # Here we assume we're converting to USD from EUR as an example
+                fx_ticker = f"{currency}USD=X"
+                fx_exchange = yf.Ticker(fx_ticker)
+                fx_data = fx_exchange.history(period='1d')
+                exchange_rate = fx_data['Close'].iloc[-1]
                 last_close = last_close * exchange_rate
-            except requests.exceptions.RequestException as e:
-                print(f"Could not fetch exchange rate for {currency}: {e}")
+            except Exception as e:
+                print(f"Could not fetch exchange rate for {currency} to USD: {e}")
                 # Keep the original price if conversion fails
 
         # Update the portfolio DataFrame
@@ -87,9 +88,20 @@ def predict_sarima(series, steps):
     """
     Fit SARIMA model and predict future values.
     """
-    # Note: This is a basic setup. In practice, you might need to select optimal parameters.
+    # Verificar se o índice de 'series' é datetime
+    series.index = pd.to_datetime(series.index)
+
+    # Atribuir frequência diária ao índice
+    series = series.asfreq('D')
+
+    # Caso haja valores faltantes, pode-se preencher esses valores
+    series = series.fillna(method='ffill')
+
+    # Ajustar o modelo SARIMA
     model = SARIMAX(series, order=(1, 1, 1), seasonal_order=(1, 1, 1, 12))
     results = model.fit(disp=False)
+
+    # Fazer a previsão
     forecast = results.forecast(steps=steps)
     return forecast
 
@@ -109,7 +121,8 @@ def predict_portfolio(portfolio, etf_data, years):
                 'Index': index,
                 'Symbol': ticker,
                 'today': series.iloc[-1],  # Latest value
-                **{f"{y} years": forecast[int(y * 365) - 1] for y in YEARS_TO_PREDICT}
+                #**{f"{y} years": forecast[int(y * 365) - 1] for y in YEARS_TO_PREDICT}
+                **{f"{y} years": forecast.iloc[int(y * 365) - 1] for y in YEARS_TO_PREDICT}
             })
     return predictions
 
@@ -133,10 +146,13 @@ def save_predictions(portfolio, predictions):
     print(f"Predictions saved to {OUTPUT_PATH}")
 
 
-def print_statistics(df_predictions):
+def visualize_statistics(df_predictions):
     """
-    Calculate quantity * price for today, 5, 10, and 15 years for each row.
-    Then, print the results grouped by ETF.
+    Visualize quantity * price for today, 5, 10, and 15 years for each ETF.
+
+    This function creates:
+    1. A table showing ETF portfolio values over time.
+    2. A pie chart for ETF breakdown based on today's value.
     """
     # Calculate total value for today and future periods for each row
     df_predictions['Total Today'] = df_predictions['Quantity'] * df_predictions['today']
@@ -150,22 +166,22 @@ def print_statistics(df_predictions):
         **{f'Total {year} years': 'sum' for year in YEARS_TO_PREDICT}
     }).reset_index()
 
-    # Print total portfolio statistics
-    total_today = grouped['Total Today'].sum()
-    print(f"Total Portfolio Value Today: ${total_today:.2f}")
+    # Create table
+    table_data = grouped[['Symbol', 'Total Today'] + [f'Total {year} years' for year in YEARS_TO_PREDICT]]
 
-    for year in YEARS_TO_PREDICT:
-        total_future = grouped[f'Total {year} years'].sum()
-        print(f"Predicted Total Portfolio Value in {year} years: ${total_future:.2f}")
+    # Calculate totals for each column
+    total_row = table_data.sum().to_frame().T
+    total_row['Symbol'] = 'Total'
 
-    # Print ETF breakdown
-    print("\n--- ETF Breakdown ---")
-    for _, row in grouped.iterrows():
-        print(f"\nETF: {row['Symbol']}")
-        print(f"  Quantity: {row['Quantity']}")
-        print(f"  Total Value Today: ${row['Total Today']:.2f}")
-        for year in YEARS_TO_PREDICT:
-            print(f"  Predicted Total Value in {year} years: ${row[f'Total {year} years']:.2f}")
+    # Concatenate total row to the DataFrame
+    table_data = pd.concat([table_data, total_row], ignore_index=True)
+
+    # Format numbers with dollar sign and no conversion to billions
+    for col in table_data.columns[1:]:
+        table_data[col] = table_data[col].apply(lambda x: f'${x:.2f}')
+
+    # Print table
+    print(table_data.to_string(index=False))
 
 if __name__ == "__main__":
     # Step 1: Read and normalize portfolio
@@ -185,4 +201,4 @@ if __name__ == "__main__":
 
     # Step 6: Print statistics
     df_predictions = pd.read_csv(OUTPUT_PATH, index_col=0)
-    print_statistics(df_predictions)
+    visualize_statistics(df_predictions)
