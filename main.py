@@ -88,23 +88,14 @@ def predict_sarima(series, steps):
     """
     Fit SARIMA model and predict future values.
     """
-    # Verificar se o índice de 'series' é datetime
     series.index = pd.to_datetime(series.index)
-
-    # Atribuir frequência diária ao índice
+    # Add freq
     series = series.asfreq('D')
-
-    # Caso haja valores faltantes, pode-se preencher esses valores
     series = series.fillna(method='ffill')
-
-    # Ajustar o modelo SARIMA
     model = SARIMAX(series, order=(1, 1, 1), seasonal_order=(1, 1, 1, 12))
     results = model.fit(disp=False)
-
-    # Fazer a previsão
     forecast = results.forecast(steps=steps)
     return forecast
-
 
 def predict_portfolio(portfolio, etf_data, years):
     """
