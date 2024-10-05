@@ -10,7 +10,7 @@ import os
 DATA_PATH = '/Users/caioteixeira/PycharmProjects/etfperformance/portfolio_data/'
 PORTFOLIO_PATH = DATA_PATH + 'path_to_your_yahoo_finance_portfolio.csv'
 OUTPUT_PATH = DATA_PATH + 'predictions.csv'
-YEARS_TO_PREDICT = [5, 10, 15, 20]
+YEARS_TO_PREDICT = [1, 5]
 
 def read_and_normalize_portfolio(file_path):
     """
@@ -37,7 +37,7 @@ def fetch_and_enrich_etf_data(portfolio):
         etf = yf.Ticker(ticker)
 
         # Fetch historical data
-        data = etf.history(period='5y')
+        data = etf.history(period='ytd')
         #data = etf.history(period='max')
         etf_data[ticker] = data['Close']
 
@@ -62,16 +62,21 @@ def fetch_and_enrich_etf_data(portfolio):
                 fx_data = fx_exchange.history(period='1d')
                 exchange_rate = fx_data['Close'].iloc[-1]
                 last_close = last_close * exchange_rate
+                ma50 = ma50 * exchange_rate
+
+
             except Exception as e:
                 print(f"Could not fetch exchange rate for {currency} to USD: {e}")
                 # Keep the original price if conversion fails
 
         # Update the portfolio DataFrame
         portfolio.loc[portfolio['Symbol'] == ticker, 'Last_Close'] = last_close
+        portfolio.loc[portfolio['Symbol'] == ticker, 'Current Price'] = last_close
         portfolio.loc[portfolio['Symbol'] == ticker, 'MA50'] = ma50
         portfolio.loc[portfolio['Symbol'] == ticker, 'Volatility'] = volatility
         portfolio.loc[portfolio['Symbol'] == ticker, 'Expense_Ratio'] = expense_ratio
         portfolio.loc[portfolio['Symbol'] == ticker, 'Currency'] = currency  # Add currency column
+
 
     return portfolio, etf_data
 
@@ -97,24 +102,64 @@ def predict_sarima(series, steps):
     forecast = results.forecast(steps=steps)
     return forecast
 
+
 def predict_portfolio(portfolio, etf_data, years):
     """
-    Predict future values for each ETF in the portfolio. Handles repeated tickers.
+    Predict future values for each ETF in the portfolio, converting to USD if necessary.
+
+    Args:
+    portfolio (pd.DataFrame): DataFrame containing portfolio details with a 'Symbol' column.
+    etf_data (dict): Dictionary where keys are ETF symbols and values are price series.
+    years (int): Number of years to predict into the future.
+
+    Returns:
+    list: A list of dictionaries containing predictions for each ETF, converted to USD if needed.
     """
     predictions = []
+    steps = int(years * 365)  # Assuming daily predictions
+
     for index, row in portfolio.iterrows():
         ticker = row['Symbol']
-        steps = int(years * 365)  # Assuming daily predictions
         if ticker in etf_data:
             series = etf_data[ticker]
             forecast = predict_sarima(series, steps)
-            predictions.append({
+
+            # Obter informações do ETF diretamente dentro da função
+            try:
+                etf = yf.Ticker(ticker)
+                etf_info = etf.info
+                currency = etf_info.get('currency', 'USD')
+            except Exception as e:
+                print(f"Failed to retrieve info for {ticker}: {e}")
+                currency = 'USD'  # Default to USD if info can't be retrieved
+
+            # Preparar o dicionário de predições
+            pred_dict = {
                 'Index': index,
                 'Symbol': ticker,
-                'today': series.iloc[-1],  # Latest value
-                #**{f"{y} years": forecast[int(y * 365) - 1] for y in YEARS_TO_PREDICT}
+                'today': series.iloc[-1],  # Último valor da série
                 **{f"{y} years": forecast.iloc[int(y * 365) - 1] for y in YEARS_TO_PREDICT}
-            })
+            }
+
+            #print(f"Currency for {ticker}: {currency}")
+
+            # Converter o preço para USD, se necessário
+            if currency != 'USD':
+                try:
+                    fx_ticker = f"{currency}USD=X"
+                    fx_exchange = yf.Ticker(fx_ticker)
+                    fx_data = fx_exchange.history(period='1d')
+                    exchange_rate = fx_data['Close'].iloc[-1]
+                    pred_dict['today'] *= exchange_rate
+                    for key in [k for k in pred_dict.keys() if 'years' in k]:
+                        pred_dict[key] *= exchange_rate
+                except Exception as e:
+                    print(f"Failed to convert {ticker} from {currency} to USD: {e}. Using original currency.")
+
+            predictions.append(pred_dict)
+        else:
+            print(f"No data found for ticker: {ticker}")
+
     return predictions
 
 def save_predictions(portfolio, predictions):
